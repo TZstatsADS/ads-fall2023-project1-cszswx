@@ -1,0 +1,241 @@
+---
+title: 'Analyzing the Words People Use to Describe Their Happy Moments'
+author: "Jianjie Sun"
+date: "2023-09-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Load package
+library(tm)
+library(tidytext)
+library(tidyverse)
+library(wordcloud2)
+library(ggplot2)
+library(DT)
+```
+<p style="font-size: 24px;">**Introduction**</p>
+
+Understanding what makes people happy is essential to augment positive experiences. HappyDB, a crowd-sourced collection of 100,000 happy moments is the data set which I focus on in this project. My goal is to build a EDA that understands how people express their happiness in text while achieving insights into happiness-leading events and scenarios on a scale. 
+
+```{r}
+# Read data
+# hm for cleaned_hm.csv
+# demo for demographic.csv
+hm_path <- "C:/Users/Jay S/Desktop/Columbia/5243 Applied Data Science/5243 Project1/cleaned_hm.csv"           
+demo_path <- "C:/Users/Jay S/Desktop/Columbia/5243 Applied Data Science/5243 Project1/demographic.csv"
+
+hm_data <- read_csv(hm_path)
+demo_data <- read_csv(demo_path)
+```
+<p style="font-size: 24px;">**Data Cleaning and Data Mining**</p>
+```{r}
+# Text preprocessing
+corpus <- VCorpus(VectorSource(hm_data$cleaned_hm)) %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removeWords, stopwords("en")) %>%
+  tm_map(stripWhitespace)
+```
+
+
+```{r}
+# Stemming and tokenizing
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+```
+
+
+```{r}
+extra_stop_words <- c("happy","ago","yesterday","lot","today","months","month",
+                      "happier","happiest","last","week","past")
+stop_words <- stop_words %>% bind_rows(tibble(word = extra_stop_words, lexicon = "custom"))
+
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) %>%
+  anti_join(stop_words, by = c("dictionary" = "word"))
+
+completed_final <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct()
+
+completed_final <- completed_final %>%
+  right_join(completed, by = "stems") %>%
+  select(-stems) %>%
+  group_by(id) %>%
+  summarise(text = str_c(word, collapse = " ")) %>%
+  ungroup()
+```
+
+```{r}
+# Merge with original data
+hm_data <- hm_data %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed_final, by = "id")
+head(hm_data)
+```
+
+
+```{r}
+# Function to count words in a text string
+word_count <- function(text) {
+  sum(str_count(text, "\\S+"))
+}
+```
+
+
+```{r}
+# Process and filter data
+hm_data <- hm_data %>%
+  inner_join(demo_data, by = "wid") %>%
+  select(
+    wid,
+    original_hm,
+    gender,
+    marital,
+    parenthood,
+    reflection_period,
+    age,
+    country,
+    ground_truth_category,
+    text
+  ) %>%
+  mutate(count = str_count(text, "\\S+")) %>%  
+  filter(
+    gender %in% c("m", "f"),
+    marital %in% c("single", "married"),
+    parenthood %in% c("n", "y"),
+    reflection_period %in% c("24h", "3m")
+  ) %>%
+  mutate(reflection_period = fct_recode(reflection_period, months_3 = "3m", hours_24 = "24h"))
+
+head(hm_data)
+```
+
+```{r}
+# Create Bag of Words
+bag_of_words <- hm_data %>%
+  unnest_tokens(word, text)
+
+word_count <- bag_of_words %>%
+  count(word, sort = TRUE)
+
+hm_bigrams <- hm_data %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+bigram_counts <- hm_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>%
+  count(word1, word2, sort = TRUE) %>%
+  filter(n > 1)  
+
+wc <- word_count %>% filter(n > 3100)
+```
+
+<p style="font-size: 24px;">**Visualization and Interpretation**</p>
+```{r}
+# Create plots
+ggplot(data = word_count, aes(y = n)) +
+  geom_boxplot(fill = "lightblue", color = "blue", outlier.color = "red", notch = TRUE) +
+  ylab('Word Frequency') +
+  ggtitle('Boxplot of Word Frequencies') +
+  theme_minimal() + 
+  theme(axis.text.x = element_blank(),  
+        legend.position = "none")  
+
+ggplot(data = wc, aes(x = reorder(word, -n), y = n, fill = n)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_gradient("Count", low = "blue", high = "red") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+```{r}
+#From the plot we can easily see that the words which people pick most frequently when they are happy.
+library(scales)
+library(ngram)
+library(shiny) 
+library(gridExtra)
+
+attribute_gender_data = bag_of_words %>%
+      count(gender, word) %>%
+      group_by(gender) %>%
+      mutate(proportion = n / sum(n)) %>% 
+      select(-n) %>% 
+      spread(gender, proportion)
+
+attribute_gender = ggplot(attribute_gender_data, 
+             aes_string(x = colnames(attribute_gender_data)[2], 
+                        y = colnames(attribute_gender_data)[3]),
+             colour = abs(colnames(attribute_gender_data)[3] - colnames(attribute_gender_data)[2])) +
+      geom_jitter(alpha = 0.1, size = 1, width = 0.3, height = 0.3, colour = "red") +
+      geom_text(aes(label = word), check_overlap = TRUE, vjust = 3) +
+      ggtitle("Proportion for Gender Attribute") +
+      xlab("Female") + ylab("Male") + 
+      scale_x_log10(labels = percent_format()) +
+      scale_y_log10(labels = percent_format()) +
+      theme(legend.position="none")
+
+print(attribute_gender)
+
+```
+Using the bag-of-words method to analyze data reveals that high-proportion terms are closely related to specific attributes like parenthood, reflection period, and gender. For instance, discussions about happiness in the context of gender see women mentioning terms like "makeup" and men talking about "beer." These findings highlight the significant impact of individual attributes on the language used to discuss happiness.
+
+```{r}
+# Top 3 most frequent words used within each age groups
+if (all(c("age", "word") %in% names(bag_of_words))) {
+  
+  processed <- bag_of_words %>%
+    select(age, word) %>%
+    mutate(age_group = cut(age, seq(0, 100, by = 5), right = FALSE)) %>%
+    count(age_group, word, name = "count") %>%
+    arrange(desc(count))
+
+  top_words <- processed %>%
+    group_by(age_group) %>%
+    slice_max(order_by = count, n = 3) %>%
+    ungroup()
+  
+  filtered_top_words <- top_words %>%
+    group_by(age_group) %>%
+    filter(sum(count) > 0, !is.na(age_group)) %>%
+    ungroup()
+
+  p <- ggplot(filtered_top_words, aes(x = age_group, y = count, fill = word)) +
+    geom_bar(stat = "identity") +
+    labs(title = "Usage of Top Words",
+         x = "Age Group",
+         y = "Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p)
+
+} else {
+  message("The required columns (age and word) are not present in the bag_of_words data frame.")
+}
+
+```
+
+From the plot, it's evident that the frequency of happy words varies significantly across different age groups. Furthermore, certain words maintain a high usage rate across a broad age range, suggesting that while happiness is a complex emotional state influenced by various factors, there are universally resonant words that are commonly associated with joy. 
+
+<p style="font-size: 24px;">**Summary**</p>
+
+The factors that contribute to happiness are diverse and multifaceted, encompassing elements such as social connections, personal achievements, career fulfillment, leisure activities, and individual preferences. Furthermore, what captures people's attention and brings them joy is not static but evolves over time, adapting to life's changing circumstances and stages.
